@@ -1,77 +1,95 @@
+import logging
 import yaml
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 from telegram import Update
-from telegram.ext import Updater, CommandHandler, CallbackContext
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    filters,
+    ContextTypes,
+    ConversationHandler,
+)
 
-# Чтение конфига
-with open('config.yaml', 'r') as file:
-    config = yaml.safe_load(file)
-TELEGRAM_TOKEN = config['telegram']['token']
+# Состояния
+WAITING_FOR_TASK_NAME, WAITING_FOR_VALUE_CATEGORY, WAITING_FOR_EFFORT, WAITING_FOR_EXPECTED_VALUE = range(4)
 
-# Настройка Google Sheets
-SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
-SPREADSHEET_ID = '1yF44tEwMDRDEE_8ZYLbAJcL5vHtMaCWnP2yUSKxoxCo'  # Замени на ID своей Google Таблицы
-RANGE_NAME = 'Sheet1!A2:F'  # Диапазон для задач (со 2-й строки)
+# Чтение конфигурации
+with open("config.yaml") as f:
+    config = yaml.safe_load(f)
 
-def get_sheets_service():
-    creds = service_account.Credentials.from_service_account_file(
-        'google_credentials.json', scopes=SCOPES)
-    service = build('sheets', 'v4', credentials=creds)
-    return service.spreadsheets()
+# Google Sheets setup
+scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+creds = ServiceAccountCredentials.from_json_keyfile_name("google_credentials.json", scope)
+client = gspread.authorize(creds)
+sheet = client.open_by_key(config["spreadsheet_id"]).sheet1
 
-# Команда /add
-def add_task(update: Update, context: CallbackContext):
-    user_id = update.message.from_user.id
-    args = context.args
-    if len(args) < 2:
-        update.message.reply_text('Используй: /add <задача> <дата_время> [приоритет]\nПример: /add Купить молоко 2023-10-15_14:00 High')
-        return
-    
-    task = ' '.join(args[:-1]) if len(args) > 2 else args[0]
-    due_date = args[-1] if len(args) > 2 else args[1]
-    priority = args[-1] if len(args) % 2 == 1 and args[-1] in ['Low', 'Medium', 'High'] else 'Medium'
-    
-    sheets = get_sheets_service()
-    # Получаем текущие задачи для определения ID
-    result = sheets.values().get(spreadsheetId=SPREADSHEET_ID, range=RANGE_NAME).execute()
-    values = result.get('values', [])
-    new_id = len(values) + 1
-    
-    # Новая задача
-    new_task = [new_id, user_id, task, due_date, priority, 'Pending']
-    
-    # Добавляем в таблицу
-    sheets.values().append(
-        spreadsheetId=SPREADSHEET_ID,
-        range=RANGE_NAME,
-        valueInputOption='RAW',
-        body={'values': [new_task]}
-    ).execute()
-    
-    update.message.reply_text(f'Задача "{task}" добавлена на {due_date}!')
+# Логгирование
+logging.basicConfig(level=logging.INFO)
 
-# Команда /list
-def list_tasks(update: Update, context: CallbackContext):
-    user_id = update.message.from_user.id
-    sheets = get_sheets_service()
-    result = sheets.values().get(spreadsheetId=SPREADSHEET_ID, range=RANGE_NAME).execute()
-    tasks = result.get('values', [])
-    
-    user_tasks = [f'ID: {task[0]}, Задача: {task[2]}, Срок: {task[3]}, Приоритет: {task[4]}, Статус: {task[5]}'
-                  for task in tasks if task[1] == str(user_id)]
-    
-    response = '\n'.join(user_tasks) if user_tasks else 'Нет задач!'
-    update.message.reply_text(response)
+# Словарь для хранения данных между шагами
+user_data = {}
 
-# Основная функция
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Привет! Напиши /add чтобы добавить задачу.")
+    
+async def add_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Как называется задача?")
+    return WAITING_FOR_TASK_NAME
+
+async def get_task_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_data[update.effective_user.id] = {"task": update.message.text}
+    await update.message.reply_text("К какой ценности относится задача? (например: здоровье, работа)")
+    return WAITING_FOR_VALUE_CATEGORY
+
+async def get_value_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_data[update.effective_user.id]["category"] = update.message.text
+    await update.message.reply_text("Укажи трудоёмкость в часах:")
+    return WAITING_FOR_EFFORT
+
+async def get_effort(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_data[update.effective_user.id]["effort"] = update.message.text
+    await update.message.reply_text("Укажи ожидаемую эффективность (в рублях):")
+    return WAITING_FOR_EXPECTED_VALUE
+
+async def get_expected_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_data[update.effective_user.id]["value"] = update.message.text
+    data = user_data[update.effective_user.id]
+
+    # Сохраняем в Google Sheet
+    sheet.append_row([
+        data["task"],
+        data["category"],
+        data["effort"],
+        data["value"]
+    ])
+
+    await update.message.reply_text("✅ Задача сохранена в таблицу!")
+    return ConversationHandler.END
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Окей, отменено.")
+    return ConversationHandler.END
+
 def main():
-    updater = Updater(TELEGRAM_TOKEN)
-    dp = updater.dispatcher
-    dp.add_handler(CommandHandler("add", add_task))
-    dp.add_handler(CommandHandler("list", list_tasks))
-    updater.start_polling()
-    updater.idle()
+    app = ApplicationBuilder().token(config["telegram_token"]).build()
 
-if __name__ == '__main__':
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("add", add_task)],
+        states={
+            WAITING_FOR_TASK_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_task_name)],
+            WAITING_FOR_VALUE_CATEGORY: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_value_category)],
+            WAITING_FOR_EFFORT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_effort)],
+            WAITING_FOR_EXPECTED_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_expected_value)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(conv_handler)
+
+    app.run_polling()
+
+if __name__ == "__main__":
     main()
