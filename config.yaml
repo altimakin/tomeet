@@ -1,0 +1,6 @@
+telegram:
+  token: "7424143645:AAFSAk4uA80t7pk_mgMJv5x21AbUW7m2v-E"
+
+google:
+  credentials_file: "google_credentials.json"
+  spreadsheet_name: "Tasks"
