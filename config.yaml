@@ -4,3 +4,4 @@ telegram:
 google:
   credentials_file: "google_credentials.json"
   spreadsheet_name: "Tasks"
+  spreadsheet_id: "1yF44tEwMDRDEE_8ZYLbAJcL5vHtMaCWnP2yUSKxoxCo"
